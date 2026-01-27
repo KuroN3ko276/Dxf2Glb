@@ -29,6 +29,10 @@ MAX_POLYLINES = None  # e.g., 1000 for testing
 # Create separate collections per layer
 ORGANIZE_BY_LAYER = True
 
+# Merge all polylines in a layer into one curve object
+# This significantly improves performance (1 object per layer instead of 1 per polyline)
+MERGE_PER_LAYER = True
+
 # Curve settings
 CURVE_RESOLUTION = 12
 CURVE_BEVEL_DEPTH = 0.5  # Set to 0 for wire-like display
@@ -114,6 +118,58 @@ def calculate_center(polylines):
     return center_x, center_y, center_z
 
 
+def create_merged_curve_from_polylines(name, polylines_data, center, collection=None):
+    """Create a single curve with multiple splines from a list of polylines."""
+    center_x, center_y, center_z = center
+    
+    # Create curve data
+    curve_data = bpy.data.curves.new(name=name, type='CURVE')
+    curve_data.dimensions = '3D'
+    curve_data.resolution_u = CURVE_RESOLUTION
+    
+    if CURVE_BEVEL_DEPTH > 0:
+        curve_data.bevel_depth = CURVE_BEVEL_DEPTH
+        curve_data.bevel_resolution = 2
+    
+    spline_count = 0
+    for pl in polylines_data:
+        points = pl.get('points', [])
+        closed = pl.get('closed', False)
+        
+        if len(points) < 2:
+            continue
+        
+        # Center the points
+        centered_points = [
+            (p[0] - center_x, p[1] - center_y, p[2] - center_z)
+            for p in points
+        ]
+        
+        # Create spline
+        spline = curve_data.splines.new('POLY')
+        spline.points.add(len(centered_points) - 1)  # Already has 1 point
+        
+        for i, point in enumerate(centered_points):
+            x, y, z = point
+            spline.points[i].co = (x * SCALE, y * SCALE, z * SCALE, 1)
+        
+        if closed:
+            spline.use_cyclic_u = True
+        
+        spline_count += 1
+    
+    # Create object
+    curve_obj = bpy.data.objects.new(name, curve_data)
+    
+    # Link to collection
+    if collection:
+        collection.objects.link(curve_obj)
+    else:
+        bpy.context.scene.collection.objects.link(curve_obj)
+    
+    return curve_obj, spline_count
+
+
 def import_json(filepath):
     """Import polylines from JSON file."""
     print(f"Loading JSON from: {filepath}")
@@ -134,6 +190,7 @@ def import_json(filepath):
     # Calculate center for large coordinates
     print("Calculating center for auto-centering...")
     center_x, center_y, center_z = calculate_center(polylines)
+    center = (center_x, center_y, center_z)
     print(f"Center: ({center_x:.2f}, {center_y:.2f}, {center_z:.2f})")
     
     # Limit polylines if needed
@@ -150,9 +207,12 @@ def import_json(filepath):
         layers[layer].append(pl)
     
     print(f"Found {len(layers)} layers")
+    print(f"Merge mode: {'ON - 1 object per layer' if MERGE_PER_LAYER else 'OFF - 1 object per polyline'}")
     
     # Create curves
-    total_created = 0
+    total_objects = 0
+    total_splines = 0
+    
     for layer_name, layer_polylines in layers.items():
         print(f"Processing layer '{layer_name}' ({len(layer_polylines)} polylines)")
         
@@ -162,28 +222,38 @@ def import_json(filepath):
         else:
             collection = None
         
-        # Create curves for this layer
-        for i, pl in enumerate(layer_polylines):
-            points = pl.get('points', [])
-            closed = pl.get('closed', False)
-            
-            if len(points) < 2:
-                continue
-            
-            # Center the points
-            centered_points = [
-                [p[0] - center_x, p[1] - center_y, p[2] - center_z]
-                for p in points
-            ]
-            
-            curve_name = f"{layer_name}_{i:06d}"
-            create_curve_from_points(curve_name, centered_points, closed, collection)
-            total_created += 1
-            
-            if total_created % 1000 == 0:
-                print(f"  Created {total_created} curves...")
+        if MERGE_PER_LAYER:
+            # Create one merged curve per layer
+            curve_obj, spline_count = create_merged_curve_from_polylines(
+                layer_name, layer_polylines, center, collection
+            )
+            total_objects += 1
+            total_splines += spline_count
+            print(f"  Created merged curve with {spline_count} splines")
+        else:
+            # Create separate curves for each polyline (original behavior)
+            for i, pl in enumerate(layer_polylines):
+                points = pl.get('points', [])
+                closed = pl.get('closed', False)
+                
+                if len(points) < 2:
+                    continue
+                
+                # Center the points
+                centered_points = [
+                    [p[0] - center_x, p[1] - center_y, p[2] - center_z]
+                    for p in points
+                ]
+                
+                curve_name = f"{layer_name}_{i:06d}"
+                create_curve_from_points(curve_name, centered_points, closed, collection)
+                total_objects += 1
+                total_splines += 1
+                
+                if total_objects % 1000 == 0:
+                    print(f"  Created {total_objects} curves...")
     
-    print(f"Done! Created {total_created} curve objects")
+    print(f"Done! Created {total_objects} curve objects with {total_splines} total splines")
     
     # Zoom to fit all (Blender 4.0+ API)
     for area in bpy.context.screen.areas:
