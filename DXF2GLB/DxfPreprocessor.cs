@@ -34,6 +34,9 @@ public class DxfPreprocessor
         result.Stats.EntityCounts["Circles"] = doc.Entities.Circles.Count();
         result.Stats.EntityCounts["Ellipses"] = doc.Entities.Ellipses.Count();
         result.Stats.EntityCounts["Splines"] = doc.Entities.Splines.Count();
+        result.Stats.EntityCounts["PolygonMeshes"] = doc.Entities.PolygonMeshes.Count();
+        result.Stats.EntityCounts["PolyfaceMeshes"] = doc.Entities.PolyfaceMeshes.Count();
+        result.Stats.EntityCounts["Faces3D"] = doc.Entities.Faces3D.Count();
 
         // Process Lines
         foreach (var line in doc.Entities.Lines)
@@ -57,7 +60,20 @@ public class DxfPreprocessor
             if (!ShouldProcess(pl)) continue;
             var points = pl.Vertexes.Select(v => ToVector3d(v.Position)).ToList();
             originalVertexCount += points.Count;
-            var simplified = RamerDouglasPeucker.Simplify(points, _options.PolylineEpsilon);
+            
+            List<Vector3d> simplified;
+            if (points.Count > 500_000)
+            {
+                Console.WriteLine($"  Large Polyline2D detected: {points.Count:N0} points");
+                simplified = RamerDouglasPeucker.SimplifyLarge(points, _options.PolylineEpsilon,
+                    progressCallback: (done, total) => Console.Write($"\r    Processing: {done:N0}/{total:N0} points..."));
+                Console.WriteLine($"\r    Simplified to {simplified.Count:N0} points                    ");
+            }
+            else
+            {
+                simplified = RamerDouglasPeucker.Simplify(points, _options.PolylineEpsilon);
+            }
+            
             result.Polylines.Add(new OptimizedPolyline(pl.Layer.Name, simplified, pl.IsClosed));
         }
 
@@ -67,7 +83,20 @@ public class DxfPreprocessor
             if (!ShouldProcess(pl)) continue;
             var points = pl.Vertexes.Select(v => ToVector3d(v)).ToList();
             originalVertexCount += points.Count;
-            var simplified = RamerDouglasPeucker.Simplify(points, _options.PolylineEpsilon);
+            
+            List<Vector3d> simplified;
+            if (points.Count > 500_000)
+            {
+                Console.WriteLine($"  Large Polyline3D detected: {points.Count:N0} points");
+                simplified = RamerDouglasPeucker.SimplifyLarge(points, _options.PolylineEpsilon,
+                    progressCallback: (done, total) => Console.Write($"\r    Processing: {done:N0}/{total:N0} points..."));
+                Console.WriteLine($"\r    Simplified to {simplified.Count:N0} points                    ");
+            }
+            else
+            {
+                simplified = RamerDouglasPeucker.Simplify(points, _options.PolylineEpsilon);
+            }
+            
             result.Polylines.Add(new OptimizedPolyline(pl.Layer.Name, simplified, pl.IsClosed));
         }
 
@@ -151,7 +180,93 @@ public class DxfPreprocessor
             result.Polylines.Add(new OptimizedPolyline(spline.Layer.Name, simplified, spline.IsClosed));
         }
 
-        // Merge near points if enabled
+        // Process PolyfaceMeshes (contains vertex + face data)
+        foreach (var mesh in doc.Entities.PolyfaceMeshes)
+        {
+            if (!ShouldProcess(mesh)) continue;
+            var vertices = mesh.Vertexes.Select(v => ToVector3d(v)).ToList();
+            originalVertexCount += vertices.Count;
+            
+            Console.WriteLine($"  PolyfaceMesh with {vertices.Count:N0} vertices");
+            
+            // For meshes, we keep unique vertices, then simplify
+            List<Vector3d> simplified;
+            if (vertices.Count > 500_000)
+            {
+                Console.WriteLine($"    Large mesh detected: {vertices.Count:N0} vertices");
+                simplified = RamerDouglasPeucker.SimplifyLarge(vertices, _options.PolylineEpsilon,
+                    progressCallback: (done, total) => Console.Write($"\r    Processing: {done:N0}/{total:N0} vertices..."));
+                Console.WriteLine($"\r    Simplified to {simplified.Count:N0} vertices                    ");
+            }
+            else
+            {
+                simplified = RamerDouglasPeucker.Simplify(vertices, _options.PolylineEpsilon);
+            }
+            
+            result.Polylines.Add(new OptimizedPolyline(mesh.Layer.Name, simplified, false));
+        }
+
+        // Process PolygonMeshes (netDxf PolygonMesh entity)
+        foreach (var mesh in doc.Entities.PolygonMeshes)
+        {
+            if (!ShouldProcess(mesh)) continue;
+            var vertices = mesh.Vertexes.Select(v => ToVector3d(v)).ToList();
+            originalVertexCount += vertices.Count;
+            
+            Console.WriteLine($"  PolygonMesh with {vertices.Count:N0} vertices");
+            
+            List<Vector3d> simplified;
+            if (vertices.Count > 500_000)
+            {
+                Console.WriteLine($"    Large mesh detected: {vertices.Count:N0} vertices");
+                simplified = RamerDouglasPeucker.SimplifyLarge(vertices, _options.PolylineEpsilon,
+                    progressCallback: (done, total) => Console.Write($"\r    Processing: {done:N0}/{total:N0} vertices..."));
+                Console.WriteLine($"\r    Simplified to {simplified.Count:N0} vertices                    ");
+            }
+            else
+            {
+                simplified = RamerDouglasPeucker.Simplify(vertices, _options.PolylineEpsilon);
+            }
+            
+            result.Polylines.Add(new OptimizedPolyline(mesh.Layer.Name, simplified, false));
+        }
+
+        // Process Face3D entities - each face has 3-4 vertices
+        var faceVertices = new List<Vector3d>();
+        foreach (var face in doc.Entities.Faces3D)
+        {
+            if (!ShouldProcess(face)) continue;
+            faceVertices.Add(ToVector3d(face.FirstVertex));
+            faceVertices.Add(ToVector3d(face.SecondVertex));
+            faceVertices.Add(ToVector3d(face.ThirdVertex));
+            if (face.FourthVertex != face.ThirdVertex)
+                faceVertices.Add(ToVector3d(face.FourthVertex));
+        }
+        
+        if (faceVertices.Count > 0)
+        {
+            Console.WriteLine($"  Face3D total: {faceVertices.Count:N0} vertices from {doc.Entities.Faces3D.Count()} faces");
+            originalVertexCount += faceVertices.Count;
+            
+            // Remove duplicate vertices
+            var uniqueVertices = faceVertices.Distinct().ToList();
+            Console.WriteLine($"    Unique vertices: {uniqueVertices.Count:N0}");
+            
+            List<Vector3d> simplified;
+            if (uniqueVertices.Count > 500_000)
+            {
+                simplified = RamerDouglasPeucker.SimplifyLarge(uniqueVertices, _options.PolylineEpsilon,
+                    progressCallback: (done, total) => Console.Write($"\r    Processing: {done:N0}/{total:N0} vertices..."));
+                Console.WriteLine($"\r    Simplified to {simplified.Count:N0} vertices                    ");
+            }
+            else
+            {
+                simplified = RamerDouglasPeucker.Simplify(uniqueVertices, _options.PolylineEpsilon);
+            }
+            
+            result.Polylines.Add(new OptimizedPolyline("Face3D", simplified, false));
+        }
+
         if (_options.MergeDistance > 0)
         {
             result.Polylines = MergeNearPoints(result.Polylines, _options.MergeDistance);

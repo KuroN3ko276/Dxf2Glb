@@ -4,13 +4,15 @@ namespace DXF2GLB.Algorithms;
 
 /// <summary>
 /// Ramer-Douglas-Peucker algorithm for polyline simplification.
-/// Reduces points while preserving shape within given tolerance.
+/// This version uses iterative approach with explicit stack to avoid stack overflow
+/// for very large polylines (millions of points).
 /// </summary>
 public static class RamerDouglasPeucker
 {
     /// <summary>
     /// Simplifies a polyline by removing points that are within epsilon distance
     /// from the line segment connecting their neighbors.
+    /// Uses iterative algorithm to handle very large polylines without stack overflow.
     /// </summary>
     /// <param name="points">Input points</param>
     /// <param name="epsilon">Maximum allowed perpendicular distance</param>
@@ -20,52 +22,132 @@ public static class RamerDouglasPeucker
         if (points.Count < 3)
             return points.ToList();
 
+        // Use iterative approach with explicit stack to avoid stack overflow
+        var keepPoints = new bool[points.Count];
+        keepPoints[0] = true;
+        keepPoints[points.Count - 1] = true;
+
+        // Stack stores (startIndex, endIndex) pairs to process
+        var stack = new Stack<(int start, int end)>();
+        stack.Push((0, points.Count - 1));
+
+        while (stack.Count > 0)
+        {
+            var (startIndex, endIndex) = stack.Pop();
+
+            if (endIndex <= startIndex + 1)
+                continue;
+
+            // Find the point with maximum distance from line (start -> end)
+            var start = points[startIndex];
+            var end = points[endIndex];
+            var maxDistance = 0.0;
+            var maxIndex = startIndex;
+
+            for (var i = startIndex + 1; i < endIndex; i++)
+            {
+                var distance = PerpendicularDistance(points[i], start, end);
+                if (distance > maxDistance)
+                {
+                    maxDistance = distance;
+                    maxIndex = i;
+                }
+            }
+
+            // If max distance is greater than epsilon, keep this point and process both halves
+            if (maxDistance > epsilon)
+            {
+                keepPoints[maxIndex] = true;
+                stack.Push((startIndex, maxIndex));
+                stack.Push((maxIndex, endIndex));
+            }
+            // else: all points between start and end are within tolerance, discard them
+        }
+
+        // Build result from keep flags
         var result = new List<Vector3d>();
-        SimplifyRecursive(points, 0, points.Count - 1, epsilon, result);
-        result.Add(points[^1]);
+        for (var i = 0; i < points.Count; i++)
+        {
+            if (keepPoints[i])
+                result.Add(points[i]);
+        }
+
         return result;
     }
 
-    private static void SimplifyRecursive(
+    /// <summary>
+    /// Simplifies a very large polyline using chunked processing with progress reporting.
+    /// Divides the polyline into chunks, simplifies each, then merges results.
+    /// </summary>
+    /// <param name="points">Input points (can be millions)</param>
+    /// <param name="epsilon">Maximum allowed perpendicular distance</param>
+    /// <param name="chunkSize">Number of points per chunk (default: 100,000)</param>
+    /// <param name="progressCallback">Optional callback: (processedPoints, totalPoints)</param>
+    /// <returns>Simplified list of points</returns>
+    public static List<Vector3d> SimplifyLarge(
         IReadOnlyList<Vector3d> points,
-        int startIndex,
-        int endIndex,
         double epsilon,
-        List<Vector3d> result)
+        int chunkSize = 100_000,
+        Action<int, int>? progressCallback = null)
     {
-        if (endIndex <= startIndex + 1)
+        if (points.Count < 3)
+            return points.ToList();
+
+        // For small polylines, use regular simplify
+        if (points.Count <= chunkSize * 2)
         {
-            result.Add(points[startIndex]);
-            return;
+            return Simplify(points, epsilon);
         }
 
-        // Find the point with maximum distance from line (start -> end)
-        var start = points[startIndex];
-        var end = points[endIndex];
-        var maxDistance = 0.0;
-        var maxIndex = startIndex;
+        var result = new List<Vector3d>();
+        var totalPoints = points.Count;
+        var processedPoints = 0;
 
-        for (var i = startIndex + 1; i < endIndex; i++)
+        // Calculate overlap size to ensure smooth transitions between chunks
+        var overlapSize = Math.Min(1000, chunkSize / 10);
+
+        var chunkStart = 0;
+        while (chunkStart < totalPoints)
         {
-            var distance = PerpendicularDistance(points[i], start, end);
-            if (distance > maxDistance)
+            var chunkEnd = Math.Min(chunkStart + chunkSize, totalPoints);
+            
+            // Extract chunk with overlap
+            var actualEnd = Math.Min(chunkEnd + overlapSize, totalPoints);
+            var chunkPoints = new List<Vector3d>();
+            for (var i = chunkStart; i < actualEnd; i++)
             {
-                maxDistance = distance;
-                maxIndex = i;
+                chunkPoints.Add(points[i]);
             }
+
+            // Simplify this chunk
+            var simplifiedChunk = Simplify(chunkPoints, epsilon);
+
+            // Add to result (skip first point if not first chunk to avoid duplication)
+            var startIdx = (chunkStart == 0) ? 0 : 1;
+            
+            // For non-last chunks, don't add the overlap region points yet
+            var endIdx = (chunkEnd < totalPoints) 
+                ? simplifiedChunk.Count - (int)(simplifiedChunk.Count * overlapSize / (double)chunkPoints.Count)
+                : simplifiedChunk.Count;
+            
+            for (var i = startIdx; i < endIdx; i++)
+            {
+                result.Add(simplifiedChunk[i]);
+            }
+
+            processedPoints = chunkEnd;
+            progressCallback?.Invoke(processedPoints, totalPoints);
+
+            chunkStart = chunkEnd;
         }
 
-        // If max distance is greater than epsilon, recursively simplify
-        if (maxDistance > epsilon)
+        // Ensure last point is included
+        if (result.Count > 0 && !result[^1].Equals(points[^1]))
         {
-            SimplifyRecursive(points, startIndex, maxIndex, epsilon, result);
-            SimplifyRecursive(points, maxIndex, endIndex, epsilon, result);
+            result.Add(points[^1]);
         }
-        else
-        {
-            // All points between start and end are within tolerance
-            result.Add(start);
-        }
+
+        return result;
     }
 
     /// <summary>
