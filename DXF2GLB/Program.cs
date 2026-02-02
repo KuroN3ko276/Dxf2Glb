@@ -1,4 +1,5 @@
-﻿using netDxf;
+﻿using IxMilia.Dxf;
+using IxMilia.Dxf.Entities;
 using DXF2GLB;
 using DXF2GLB.Models;
 using DXF2GLB.Export;
@@ -62,10 +63,11 @@ for (var i = 1; i < args.Length; i++)
 
 Console.WriteLine($"Loading DXF: {dxfPath}");
 
-DxfDocument? doc;
+DxfFile? dxfFile;
 try
 {
-    doc = DxfDocument.Load(dxfPath);
+    using var stream = File.OpenRead(dxfPath);
+    dxfFile = DxfFile.Load(stream);
 }
 catch (Exception e)
 {
@@ -73,29 +75,40 @@ catch (Exception e)
     return;
 }
 
-if (doc == null)
+if (dxfFile == null)
 {
     Console.WriteLine("Failed to load DXF document");
     return;
 }
 
+Console.WriteLine($"DXF Version: {dxfFile.Header.Version}");
 Console.WriteLine("Processing DXF entities...");
 Console.WriteLine();
 
 // Show original entity counts
+var lines = dxfFile.Entities.OfType<DxfLine>().ToList();
+var lwPolylines = dxfFile.Entities.OfType<DxfLwPolyline>().ToList();
+var polylines = dxfFile.Entities.OfType<DxfPolyline>().ToList();
+var arcs = dxfFile.Entities.OfType<DxfArc>().ToList();
+var circles = dxfFile.Entities.OfType<DxfCircle>().ToList();
+var ellipses = dxfFile.Entities.OfType<DxfEllipse>().ToList();
+var splines = dxfFile.Entities.OfType<DxfSpline>().ToList();
+var faces3d = dxfFile.Entities.OfType<Dxf3DFace>().ToList();
+
 Console.WriteLine("=== ORIGINAL ENTITIES ===");
-Console.WriteLine($"  Lines        : {doc.Entities.Lines.Count()}");
-Console.WriteLine($"  Polyline2D   : {doc.Entities.Polylines2D.Count()}");
-Console.WriteLine($"  Polyline3D   : {doc.Entities.Polylines3D.Count()}");
-Console.WriteLine($"  Splines      : {doc.Entities.Splines.Count()}");
-Console.WriteLine($"  Arcs         : {doc.Entities.Arcs.Count()}");
-Console.WriteLine($"  Circles      : {doc.Entities.Circles.Count()}");
-Console.WriteLine($"  Ellipses     : {doc.Entities.Ellipses.Count()}");
+Console.WriteLine($"  Lines        : {lines.Count}");
+Console.WriteLine($"  LwPolylines  : {lwPolylines.Count}");
+Console.WriteLine($"  Polylines    : {polylines.Count}");
+Console.WriteLine($"  Arcs         : {arcs.Count}");
+Console.WriteLine($"  Circles      : {circles.Count}");
+Console.WriteLine($"  Ellipses     : {ellipses.Count}");
+Console.WriteLine($"  Splines      : {splines.Count}");
+Console.WriteLine($"  3D Faces     : {faces3d.Count}");
 Console.WriteLine();
 
 // Process with preprocessor
 var preprocessor = new DxfPreprocessor(options);
-var optimized = preprocessor.Process(doc);
+var optimized = preprocessor.Process(dxfFile);
 
 // Show results
 Console.WriteLine("=== PREPROCESSING OPTIONS ===");

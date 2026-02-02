@@ -8,7 +8,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <PackageReference Include="netDxf" Version="2023.11.10" />
+      <PackageReference Include="IxMilia.Dxf" Version="0.8.1" />
     </ItemGroup>
 
 </Project>
