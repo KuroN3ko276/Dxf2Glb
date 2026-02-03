@@ -1,10 +1,8 @@
-﻿using IxMilia.Dxf;
-using IxMilia.Dxf.Entities;
-using DXF2GLB;
-using DXF2GLB.Models;
+﻿using DXF2GLB;
 using DXF2GLB.Export;
+using DXF2GLB.Models;
 
-// Parse command line arguments
+// Check for input file
 if (args.Length == 0)
 {
     PrintUsage();
@@ -12,16 +10,17 @@ if (args.Length == 0)
 }
 
 var dxfPath = args[0];
-
 if (!File.Exists(dxfPath))
 {
-    Console.WriteLine($"Error: File not found: {dxfPath}");
+    Console.WriteLine($"File not found: {dxfPath}");
     return;
 }
 
 // Parse optional parameters
 var options = new PreprocessorOptions();
-var outputPath = Path.ChangeExtension(dxfPath, ".json");
+string? outputPath = null;
+var exportGlb = false;
+var wireframe = false;
 
 for (var i = 1; i < args.Length; i++)
 {
@@ -52,65 +51,75 @@ for (var i = 1; i < args.Length; i++)
             case "-l" or "--layers":
                 options.IncludeLayers = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries);
                 break;
+            default:
+                // Check for flags without arguments
+                if (arg == "-g" || arg == "--glb")
+                    exportGlb = true;
+                else if (arg == "-w" || arg == "--wireframe")
+                    wireframe = true;
+                break;
         }
     }
-    else if (arg == "-h" || arg == "--help")
+    else
     {
-        PrintUsage();
-        return;
+        // Handle flags (no value required)
+        switch (arg)
+        {
+            case "-g" or "--glb":
+                exportGlb = true;
+                break;
+            case "-w" or "--wireframe":
+                wireframe = true;
+                break;
+            case "-h" or "--help":
+                PrintUsage();
+                return;
+        }
     }
+}
+
+// Determine output path and format
+if (outputPath == null)
+{
+    outputPath = Path.ChangeExtension(dxfPath, exportGlb ? ".glb" : ".json");
+}
+else if (exportGlb && !outputPath.EndsWith(".glb", StringComparison.OrdinalIgnoreCase))
+{
+    // If -g flag is set but output doesn't end with .glb, force GLB
+    outputPath = Path.ChangeExtension(outputPath, ".glb");
+}
+else if (outputPath.EndsWith(".glb", StringComparison.OrdinalIgnoreCase))
+{
+    // If output ends with .glb, enable GLB export
+    exportGlb = true;
 }
 
 Console.WriteLine($"Loading DXF: {dxfPath}");
 
-DxfFile? dxfFile;
-try
+// Use smart loader to pick the right library
+var loadResult = DxfLoader.Load(dxfPath);
+
+if (loadResult.Error != null)
 {
-    using var stream = File.OpenRead(dxfPath);
-    dxfFile = DxfFile.Load(stream);
-}
-catch (Exception e)
-{
-    Console.WriteLine($"Error loading DXF: {e.Message}");
+    Console.WriteLine($"Error loading DXF: {loadResult.Error}");
     return;
 }
 
-if (dxfFile == null)
+Console.WriteLine($"DXF Version: {loadResult.Version}");
+Console.WriteLine($"Library: {loadResult.LibraryUsed}");
+if (loadResult.HasPolyfaceMeshes)
 {
-    Console.WriteLine("Failed to load DXF document");
-    return;
+    Console.WriteLine($"PolyfaceMeshes: {loadResult.PolyfaceMeshCount}");
 }
-
-Console.WriteLine($"DXF Version: {dxfFile.Header.Version}");
 Console.WriteLine("Processing DXF entities...");
-Console.WriteLine();
-
-// Show original entity counts
-var lines = dxfFile.Entities.OfType<DxfLine>().ToList();
-var lwPolylines = dxfFile.Entities.OfType<DxfLwPolyline>().ToList();
-var polylines = dxfFile.Entities.OfType<DxfPolyline>().ToList();
-var arcs = dxfFile.Entities.OfType<DxfArc>().ToList();
-var circles = dxfFile.Entities.OfType<DxfCircle>().ToList();
-var ellipses = dxfFile.Entities.OfType<DxfEllipse>().ToList();
-var splines = dxfFile.Entities.OfType<DxfSpline>().ToList();
-var faces3d = dxfFile.Entities.OfType<Dxf3DFace>().ToList();
-
-Console.WriteLine("=== ORIGINAL ENTITIES ===");
-Console.WriteLine($"  Lines        : {lines.Count}");
-Console.WriteLine($"  LwPolylines  : {lwPolylines.Count}");
-Console.WriteLine($"  Polylines    : {polylines.Count}");
-Console.WriteLine($"  Arcs         : {arcs.Count}");
-Console.WriteLine($"  Circles      : {circles.Count}");
-Console.WriteLine($"  Ellipses     : {ellipses.Count}");
-Console.WriteLine($"  Splines      : {splines.Count}");
-Console.WriteLine($"  3D Faces     : {faces3d.Count}");
 Console.WriteLine();
 
 // Process with preprocessor
 var preprocessor = new DxfPreprocessor(options);
-var optimized = preprocessor.Process(dxfFile);
+var optimized = preprocessor.Process(loadResult);
 
 // Show results
+Console.WriteLine();
 Console.WriteLine("=== PREPROCESSING OPTIONS ===");
 Console.WriteLine($"  Polyline Epsilon    : {options.PolylineEpsilon}");
 Console.WriteLine($"  Arc Chord Error     : {options.ArcChordError}");
@@ -125,29 +134,52 @@ Console.WriteLine($"  Original Vertices   : {optimized.Stats.OriginalVertices:N0
 Console.WriteLine($"  Optimized Vertices  : {optimized.Stats.OptimizedVertices:N0}");
 Console.WriteLine($"  Reduction           : {optimized.Stats.ReductionPercent:F1}%");
 Console.WriteLine($"  Output Polylines    : {optimized.Stats.OptimizedPolylines:N0}");
+if (optimized.Stats.MeshCount > 0)
+{
+    Console.WriteLine($"  Output Meshes       : {optimized.Stats.MeshCount:N0}");
+    Console.WriteLine($"  Total Triangles     : {optimized.Stats.TotalTriangles:N0}");
+}
 Console.WriteLine();
 
-// Export to JSON
-JsonExporter.Export(optimized, outputPath);
-Console.WriteLine($"Exported to: {outputPath}");
+// Export
+if (exportGlb)
+{
+    Console.WriteLine("=== EXPORTING GLB ===");
+    GlbExporter.Export(optimized, outputPath, wireframe);
+    var fileSize = new FileInfo(outputPath).Length;
+    Console.WriteLine($"Exported to: {outputPath}");
+    Console.WriteLine($"File size: {fileSize / 1024.0 / 1024.0:F2} MB");
+}
+else
+{
+    JsonExporter.Export(optimized, outputPath);
+    Console.WriteLine($"Exported to: {outputPath}");
+}
 
 static void PrintUsage()
 {
-    Console.WriteLine("DXF2GLB - DXF Preprocessor for GLB Conversion");
+    Console.WriteLine("DXF2GLB - DXF to GLB Converter (Dual Library Support)");
     Console.WriteLine();
     Console.WriteLine("Usage: DXF2GLB <dxf-file> [options]");
+    Console.WriteLine();
+    Console.WriteLine("Libraries:");
+    Console.WriteLine("  - IxMilia.Dxf  : Used for AC1009/R12 files");
+    Console.WriteLine("  - netDxf       : Used for files with PolyfaceMesh data");
     Console.WriteLine();
     Console.WriteLine("Options:");
     Console.WriteLine("  -e, --epsilon <value>       Polyline simplification tolerance (default: 0.1)");
     Console.WriteLine("  -c, --chord-error <value>   Arc tessellation chord error (default: 0.01)");
     Console.WriteLine("  -s, --spline-tolerance <v>  Spline sampling tolerance (default: 0.05)");
     Console.WriteLine("  -m, --merge-distance <v>    Merge near points distance (default: 0.001)");
-    Console.WriteLine("  -o, --output <path>         Output JSON file path");
+    Console.WriteLine("  -o, --output <path>         Output file path (.json or .glb)");
+    Console.WriteLine("  -g, --glb                   Export directly to GLB format");
+    Console.WriteLine("  -w, --wireframe             Export as wireframe (lines only, no faces)");
     Console.WriteLine("  -l, --layers <l1,l2,...>    Only process specified layers");
     Console.WriteLine("  -h, --help                  Show this help message");
     Console.WriteLine();
     Console.WriteLine("Examples:");
-    Console.WriteLine("  DXF2GLB model.dxf");
-    Console.WriteLine("  DXF2GLB model.dxf -e 0.5 -o output.json");
-    Console.WriteLine("  DXF2GLB model.dxf -l Layer1,Layer2 -e 0.2");
+    Console.WriteLine("  DXF2GLB model.dxf                      # Export to JSON");
+    Console.WriteLine("  DXF2GLB model.dxf -g                   # Export to GLB");
+    Console.WriteLine("  DXF2GLB model.dxf -e 10 -o model.glb   # Export to GLB with epsilon=10");
+    Console.WriteLine("  DXF2GLB model.dxf -g -w                # Export GLB as wireframe");
 }

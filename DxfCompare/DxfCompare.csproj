@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <OutputType>Exe</OutputType>
@@ -8,9 +8,8 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <PackageReference Include="IxMilia.Dxf" Version="0.8.1" />
-      <PackageReference Include="netDxf" Version="2023.11.10" />
-      <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.6" />
+        <PackageReference Include="netDxf" Version="2023.11.10" />
+        <PackageReference Include="IxMilia.Dxf" Version="0.8.1" />
     </ItemGroup>
 
 </Project>

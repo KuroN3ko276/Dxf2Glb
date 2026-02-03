@@ -13,6 +13,8 @@ public class GeometryStats
 
     public int OriginalEntities { get; set; }
     public int OptimizedPolylines { get; set; }
+    public int MeshCount { get; set; }
+    public int TotalTriangles { get; set; }
 
     public Dictionary<string, int> EntityCounts { get; set; } = new();
 }
@@ -25,6 +27,21 @@ public record OptimizedPolyline(
     List<Vector3d> Points,
     bool IsClosed
 );
+
+/// <summary>
+/// A mesh with vertices and triangle indices (from PolyfaceMesh)
+/// </summary>
+public class OptimizedMesh
+{
+    public string Layer { get; set; } = "";
+    public List<Vector3d> Vertices { get; set; } = new();
+    /// <summary>
+    /// Triangle indices - every 3 consecutive integers form a triangle
+    /// </summary>
+    public List<int> TriangleIndices { get; set; } = new();
+    
+    public int TriangleCount => TriangleIndices.Count / 3;
+}
 
 /// <summary>
 /// 3D vector for geometry representation
@@ -77,5 +94,11 @@ public record struct Vector3d(double X, double Y, double Z)
 public class OptimizedGeometry
 {
     public List<OptimizedPolyline> Polylines { get; set; } = new();
+    public List<OptimizedMesh> Meshes { get; set; } = new();
     public GeometryStats Stats { get; set; } = new();
+    
+    /// <summary>
+    /// True if geometry came from PolyfaceMesh (has proper face data)
+    /// </summary>
+    public bool HasMeshData => Meshes.Count > 0;
 }

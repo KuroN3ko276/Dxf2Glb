@@ -1,15 +1,19 @@
-# DXF2GLB - DXF Preprocessing Pipeline
+# DXF2GLB - DXF to GLB Converter
 
-Công cụ xử lý file DXF thành GLB thông qua 2 bước:
-1. **Preprocessor (C#):** Tối ưu hóa geometry, giảm số lượng vertex, xuất ra JSON.
-2. **Blender Importer (Python):** Nhập JSON vào Blender, tạo object, và xuất ra GLB.
+Công cụ chuyển đổi file DXF sang GLB trực tiếp bằng C#.
 
-## Yêu cầu (Requirements)
-- **.NET 8.0 SDK** (để chạy Preprocessor)
-- **Blender 3.6+** (đã thêm vào PATH để chạy command `blender`)
-- **File DXF:** Phải là version **AutoCAD 2000 (AC1015)** trở lên.
-  > [!WARNING]
-  > Không hỗ trợ AutoCAD R12 (AC1009). Nếu gặp lỗi "DXF file version not supported", hãy mở file bằng AutoCAD/OdaViewer và lưu lại với version mới hơn (khuyên dùng 2010/2013/2018).
+## Tính năng
+
+- **Dual Library Support:** Tự động chọn thư viện phù hợp dựa trên nội dung file
+  - `IxMilia.Dxf` cho AC1009/R12 (phiên bản cũ)
+  - `netDxf` cho file có PolyfaceMesh (mesh với face data)
+- **Direct GLB Export:** Xuất trực tiếp sang GLB sử dụng SharpGLTF (không cần Blender)
+- **Tối ưu hóa:** Ramer-Douglas-Peucker simplification, Arc/Spline tessellation, Ear Clipping Triangulation
+
+## Yêu cầu
+
+- **.NET 9.0 SDK**
+- Hỗ trợ **tất cả các version DXF** từ R12 trở lên
 
 ## Cài đặt
 
@@ -18,85 +22,75 @@ cd d:\Sources\nobisoft\DXF2GLB
 dotnet build
 ```
 
-## Quy trình sử dụng (Workflow)
+## Sử dụng
 
-### Bước 1: Tiền xử lý (Convert DXF -> JSON)
-
-Sử dụng tool C# để đọc DXF, tối ưu hóa đường nét và xuất ra file trung gian JSON.
+### Export GLB trực tiếp (Default)
 
 ```powershell
-# Chạy với tham số mặc định
-dotnet run --project DXF2GLB -- input.dxf
+# Export GLB với cài đặt mặc định (Triangulated Mesh)
+dotnet run --project DXF2GLB -- model.dxf -g
 
-# Hoặc chỉ định output và tham số tối ưu
-# -o: Output path
-# -e: Epsilon (độ đơn giản hóa, càng lớn càng ít điểm)
-# -l: Chỉ xử lý các layer cụ thể (cách nhau bởi dấu phẩy)
-dotnet run --project DXF2GLB -- input.dxf -o data.json -e 0.5 -l "Layer1,Layer2"
+# Export với tối ưu hóa (epsilon càng lớn = file nhỏ hơn)
+dotnet run --project DXF2GLB -- model.dxf -g -e 10
+
+# Export dạng wireframe (chỉ đường, không có faces)
+dotnet run --project DXF2GLB -- model.dxf -g -w
+
+# Chỉ định output path
+dotnet run --project DXF2GLB -- model.dxf -o output.glb
 ```
 
-### Bước 2: Blender Import (Convert JSON -> GLB)
-
-Sử dụng script Python với Blender để convert JSON thành GLB. Script nằm tại `DXF2GLB\Scripts\blender_import.py`.
-
-```powershell
-# Cú pháp chạy background (không mở giao diện Blender)
-blender --background --python DXF2GLB\Scripts\blender_import.py -- <input_json> <output_glb>
-
-# Ví dụ thực tế:
-blender --background --python DXF2GLB\Scripts\blender_import.py -- data.json model.glb
-```
-
----
-
-## Chi tiết tham số Preprocessor (C#)
-
-### Options
+## Tham số
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `-g, --glb` | Export trực tiếp sang GLB | false |
+| `-w, --wireframe` | Export dạng wireframe (LINES) | false |
 | `-e, --epsilon <value>` | Polyline simplification tolerance | 0.1 |
 | `-c, --chord-error <value>` | Arc tessellation chord error | 0.01 |
 | `-s, --spline-tolerance <value>` | Spline sampling tolerance | 0.05 |
 | `-m, --merge-distance <value>` | Merge near points distance | 0.001 |
-| `-o, --output <path>` | Output JSON file path | `<input>.json` |
-| `-l, --layers <l1,l2,...>` | Only process specific layers | all |
+| `-o, --output <path>` | Output file path | `<input>.glb` |
+| `-l, --layers <l1,l2,...>` | Chỉ xử lý các layer cụ thể | all |
 
-### 1. Epsilon (Polyline Simplification) `-e`
+## Khuyến nghị Epsilon theo đơn vị
 
-**Thuật toán:** Ramer-Douglas-Peucker (RDP) - Giảm số điểm trên đường cong/gấp khúc.
-
-- **Giá trị nhỏ** (0.1): Giữ nhiều chi tiết (tốt cho kiến trúc, cơ khí).
-- **Giá trị lớn** (10 - 100): Giữ dáng chính, loại bỏ chi tiết nhỏ (tốt cho bản đồ địa hình lớn).
-
-**Khuyến nghị theo đơn vị DXF:**
-| Đơn vị | Epsilon khuyến nghị | Ghi chú |
-|--------|---------------------|---------|
+| Đơn vị DXF | Epsilon | Ghi chú |
+|------------|---------|---------|
 | mm | 0.1 - 1.0 | File CAD chi tiết |
 | cm | 1.0 - 10.0 | File thiết kế |
 | m (UTM) | 10 - 100 | Dữ liệu địa hình |
 
-### 2. Chord Error (Arc Tessellation) `-c`
+## Architecture
 
-**Áp dụng cho:** Arc, Circle.
+```
+DXF File
+    │
+    ▼
+┌─────────────┐
+│  DxfLoader  │  ← Chọn library phù hợp
+└─────────────┘
+    │
+    ├── R12/AC1009 ───────► IxMilia.Dxf
+    │
+    └── PolyfaceMesh ─────► netDxf
+           │
+           ▼
+    ┌──────────────────┐
+    │  DxfPreprocessor │  ← Tối ưu hóa geometry
+    └──────────────────┘
+           │
+           ▼
+    ┌─────────────┐
+    │ GlbExporter │  ← SharpGLTF (Native C#)
+    └─────────────┘
+           │
+           ▼
+       GLB File
+```
 
-- **Giá trị nhỏ** (0.001): Đường tròn rất tròn (nhiều vertex).
-- **Giá trị lớn** (0.1 - 1.0): Đường tròn bị gãy khúc (ít vertex).
+## Dependencies
 
-### 3. Merge Distance `-m`
-
-Khoảng cách để gộp các điểm trùng nhau hoặc quá gần nhau. Giữ mặc định `0.001` là tốt nhất cho hầu hết trường hợp.
-
----
-
-## Cấu hình Blender Importer
-
-Script `DXF2GLB\Scripts\blender_import.py` có các thông số cấu hình ở phần đầu file mà bạn có thể chỉnh sửa trực tiếp:
-
-| Biến | Ý nghĩa | Default |
-|------|---------|---------|
-| `SCALE` | Tỉ lệ scale toàn bộ model (1.0 = giữ nguyên) | 1.0 |
-| `MERGE_PER_LAYER` | Gộp tất cả polylines cùng layer thành 1 object | True |
-| `CURVE_BEVEL_DEPTH` | Độ dày của đường (0 = wireframe) | 0.5 |
-| `CONVERT_TO_MESH` | Chuyển curve thành mesh để tối ưu tiếp | True |
-| `DECIMATE_RATIO` | Tỉ lệ giảm lưới sau khi import (0.0 - 1.0) | 0.5 |
+- [IxMilia.Dxf](https://github.com/ixmilia/dxf) - DXF parsing (hỗ trợ AC1009/R12)
+- [netDxf](https://github.com/haplokuon/netDxf) - DXF parsing (hỗ trợ PolyfaceMesh)
+- [SharpGLTF](https://github.com/vpenades/SharpGLTF) - GLB/glTF export

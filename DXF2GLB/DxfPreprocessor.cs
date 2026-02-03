@@ -2,12 +2,13 @@ using IxMilia.Dxf;
 using IxMilia.Dxf.Entities;
 using DXF2GLB.Algorithms;
 using DXF2GLB.Models;
+using NetDxfDoc = netDxf.DxfDocument;
 
 namespace DXF2GLB;
 
 /// <summary>
 /// Main preprocessing orchestrator for DXF files.
-/// Converts DXF entities to optimized polylines for GLB export.
+/// Converts DXF entities to optimized polylines/meshes for GLB export.
 /// </summary>
 public class DxfPreprocessor
 {
@@ -19,9 +20,131 @@ public class DxfPreprocessor
     }
 
     /// <summary>
-    /// Processes a DXF file and returns optimized geometry.
+    /// Processes a DXF file using the appropriate library based on content.
     /// </summary>
-    public OptimizedGeometry Process(DxfFile file)
+    public OptimizedGeometry Process(DxfLoadResult loadResult)
+    {
+        if (loadResult.NetDxfDocument != null)
+        {
+            return ProcessNetDxf(loadResult.NetDxfDocument);
+        }
+        else if (loadResult.IxMiliaFile != null)
+        {
+            return ProcessIxMilia(loadResult.IxMiliaFile);
+        }
+        else
+        {
+            throw new InvalidOperationException("No valid DXF document loaded");
+        }
+    }
+
+    /// <summary>
+    /// Process using netDxf (for PolyfaceMesh support)
+    /// </summary>
+    private OptimizedGeometry ProcessNetDxf(NetDxfDoc doc)
+    {
+        var result = new OptimizedGeometry();
+        var originalVertexCount = 0;
+        var totalTriangles = 0;
+
+        // Process PolyfaceMeshes (the main reason to use netDxf)
+        var polyfaceMeshes = doc.Entities.PolyfaceMeshes.ToList();
+        result.Stats.EntityCounts["PolyfaceMeshes"] = polyfaceMeshes.Count;
+        
+        Console.WriteLine($"  Processing {polyfaceMeshes.Count} PolyfaceMeshes...");
+        
+        foreach (var pfMesh in polyfaceMeshes)
+        {
+            if (!ShouldProcessLayer(pfMesh.Layer.Name)) continue;
+            
+            var mesh = new OptimizedMesh
+            {
+                Layer = pfMesh.Layer.Name
+            };
+            
+            // Add vertices (Vertexes is List<Vector3>)
+            foreach (var vertex in pfMesh.Vertexes)
+            {
+                mesh.Vertices.Add(new Vector3d(vertex.X, vertex.Y, vertex.Z));
+            }
+            originalVertexCount += mesh.Vertices.Count;
+            
+            // Add faces (convert to triangles)
+            foreach (var face in pfMesh.Faces)
+            {
+                // PolyfaceMesh faces use 1-based indices, convert to 0-based
+                var indices = face.VertexIndexes.Where(i => i != 0).Select(i => Math.Abs(i) - 1).ToList();
+                
+                if (indices.Count >= 3)
+                {
+                    // Triangulate face (fan triangulation)
+                    for (int i = 1; i < indices.Count - 1; i++)
+                    {
+                        mesh.TriangleIndices.Add(indices[0]);
+                        mesh.TriangleIndices.Add(indices[i]);
+                        mesh.TriangleIndices.Add(indices[i + 1]);
+                        totalTriangles++;
+                    }
+                }
+            }
+            
+            result.Meshes.Add(mesh);
+        }
+        
+        // Also process regular polylines if any
+        var polylines3d = doc.Entities.Polylines3D.ToList();
+        result.Stats.EntityCounts["Polylines3D"] = polylines3d.Count;
+        
+        foreach (var pl in polylines3d)
+        {
+            if (!ShouldProcessLayer(pl.Layer.Name)) continue;
+            
+            var points = pl.Vertexes.Select(v => 
+                new Vector3d(v.X, v.Y, v.Z)).ToList();
+            originalVertexCount += points.Count;
+            
+            var simplified = points.Count > 500_000
+                ? RamerDouglasPeucker.SimplifyLarge(points, _options.PolylineEpsilon)
+                : RamerDouglasPeucker.Simplify(points, _options.PolylineEpsilon);
+            
+            result.Polylines.Add(new OptimizedPolyline(pl.Layer.Name, simplified, pl.IsClosed));
+        }
+        
+        // Process Lines
+        var lines = doc.Entities.Lines.ToList();
+        result.Stats.EntityCounts["Lines"] = lines.Count;
+        
+        foreach (var line in lines)
+        {
+            if (!ShouldProcessLayer(line.Layer.Name)) continue;
+            originalVertexCount += 2;
+            result.Polylines.Add(new OptimizedPolyline(
+                line.Layer.Name,
+                new List<Vector3d>
+                {
+                    new(line.StartPoint.X, line.StartPoint.Y, line.StartPoint.Z),
+                    new(line.EndPoint.X, line.EndPoint.Y, line.EndPoint.Z)
+                },
+                false
+            ));
+        }
+
+        // Calculate stats
+        result.Stats.OriginalVertices = originalVertexCount;
+        result.Stats.OptimizedVertices = result.Meshes.Sum(m => m.Vertices.Count) + 
+                                         result.Polylines.Sum(p => p.Points.Count);
+        result.Stats.OriginalEntities = result.Stats.EntityCounts.Values.Sum();
+        result.Stats.OptimizedPolylines = result.Polylines.Count;
+        result.Stats.MeshCount = result.Meshes.Count;
+        result.Stats.TotalTriangles = totalTriangles;
+
+        return result;
+    }
+
+    /// <summary>
+    /// Process using IxMilia.Dxf (for AC1009 support and general polylines)
+    /// </summary>
+    private OptimizedGeometry ProcessIxMilia(DxfFile file)
     {
         var result = new OptimizedGeometry();
         var originalVertexCount = 0;
@@ -114,7 +237,6 @@ public class DxfPreprocessor
             if (!ShouldProcess(arc)) continue;
             var center = ToVector3d(arc.Center);
             var normal = ToVector3d(arc.Normal);
-            // IxMilia.Dxf uses degrees for arc angles
             var startAngle = arc.StartAngle * Math.PI / 180.0;
             var endAngle = arc.EndAngle * Math.PI / 180.0;
 
@@ -147,13 +269,11 @@ public class DxfPreprocessor
             if (!ShouldProcess(ellipse)) continue;
             var center = ToVector3d(ellipse.Center);
             var normal = ToVector3d(ellipse.Normal);
-            // IxMilia: MajorAxis is a DxfVector, get its length for the major radius
             var majorRadius = Math.Sqrt(
                 ellipse.MajorAxis.X * ellipse.MajorAxis.X + 
                 ellipse.MajorAxis.Y * ellipse.MajorAxis.Y + 
                 ellipse.MajorAxis.Z * ellipse.MajorAxis.Z);
             var minorRadius = majorRadius * ellipse.MinorAxisRatio;
-            // Calculate rotation from MajorAxis direction
             var rotation = Math.Atan2(ellipse.MajorAxis.Y, ellipse.MajorAxis.X);
 
             var points = ArcTessellator.TessellateEllipse(
@@ -176,7 +296,6 @@ public class DxfPreprocessor
             List<Vector3d> sampled;
             if (spline.DegreeOfCurve == 3 && controlPoints.Count == 4)
             {
-                // Cubic Bezier
                 sampled = SplineSampler.SampleCubicBezier(
                     controlPoints[0], controlPoints[1],
                     controlPoints[2], controlPoints[3],
@@ -184,12 +303,10 @@ public class DxfPreprocessor
             }
             else
             {
-                // General B-spline
                 var sampleCount = Math.Max(20, controlPoints.Count * 5);
                 sampled = SplineSampler.SampleBSpline(controlPoints, spline.DegreeOfCurve, sampleCount);
             }
 
-            // Apply RDP simplification after sampling
             var simplified = RamerDouglasPeucker.Simplify(sampled, _options.PolylineEpsilon);
             result.Polylines.Add(new OptimizedPolyline(spline.Layer ?? "0", simplified, spline.IsClosed));
         }
@@ -243,6 +360,13 @@ public class DxfPreprocessor
         return result;
     }
 
+    private bool ShouldProcessLayer(string layerName)
+    {
+        if (_options.IncludeLayers == null || _options.IncludeLayers.Length == 0)
+            return true;
+        return _options.IncludeLayers.Contains(layerName, StringComparer.OrdinalIgnoreCase);
+    }
+
     private bool ShouldProcess(DxfEntity entity)
     {
         if (_options.IncludeLayers == null || _options.IncludeLayers.Length == 0)
@@ -255,9 +379,6 @@ public class DxfPreprocessor
     private static Vector3d ToVector3d(DxfPoint p) => new(p.X, p.Y, p.Z);
     private static Vector3d ToVector3d(DxfVector v) => new(v.X, v.Y, v.Z);
 
-    /// <summary>
-    /// Merges points that are very close together within each polyline.
-    /// </summary>
     private static List<OptimizedPolyline> MergeNearPoints(List<OptimizedPolyline> polylines, double mergeDistance)
     {
         var result = new List<OptimizedPolyline>(polylines.Count);
@@ -280,7 +401,6 @@ public class DxfPreprocessor
                 }
             }
 
-            // Keep at least 2 points for a line
             if (merged.Count < 2 && pl.Points.Count >= 2)
             {
                 merged = new List<Vector3d> { pl.Points[0], pl.Points[^1] };
