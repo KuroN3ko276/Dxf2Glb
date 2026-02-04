@@ -8,7 +8,14 @@ Công cụ chuyển đổi file DXF sang GLB trực tiếp bằng C#.
   - `IxMilia.Dxf` cho AC1009/R12 (phiên bản cũ)
   - `netDxf` cho file có PolyfaceMesh (mesh với face data)
 - **Direct GLB Export:** Xuất trực tiếp sang GLB sử dụng SharpGLTF (không cần Blender)
-- **Tối ưu hóa:** Ramer-Douglas-Peucker simplification, Arc/Spline tessellation, Ear Clipping Triangulation
+- **Thông minh (Smart Triangulation):** Tự động xử lý:
+  - Closed Polylines → Triangles (mặt kín)
+  - Open Polylines → Lines (đường nét)
+  - PolyfaceMesh → Native Triangles
+- **Siêu Tối ưu hóa (Mesh Optimization):** 
+  - **Vertex Clustering:** Giảm 90%+ số lượng triangles cực nhanh (O(n))
+  - **Junk Filtering:** Tự động loại bỏ rác, outliers và các island nhỏ
+- **Tối ưu hóa đường (Line Optimization):** Ramer-Douglas-Peucker simplification, Arc/Spline tessellation
 
 ## Yêu cầu
 
@@ -27,13 +34,15 @@ dotnet build
 ### Export GLB trực tiếp (Default)
 
 ```powershell
-# Export GLB với cài đặt mặc định (Triangulated Mesh)
+# Export GLB với cài đặt mặc định
 dotnet run --project DXF2GLB -- model.dxf -g
 
-# Export với tối ưu hóa (epsilon càng lớn = file nhỏ hơn)
-dotnet run --project DXF2GLB -- model.dxf -g -e 10
+# Export với tối ưu hóa file KHỔNG LỒ (Vertex Clustering)
+# -d 256: Grid resolution 256x256x256 (giảm ~90% triangles)
+# -j: Bật Junk Filter (xóa rác)
+dotnet run --project DXF2GLB -- model.dxf -g -d 256 -j
 
-# Export dạng wireframe (chỉ đường, không có faces)
+# Export dạng wireframe (chỉ khung dây)
 dotnet run --project DXF2GLB -- model.dxf -g -w
 
 # Chỉ định output path
@@ -46,12 +55,13 @@ dotnet run --project DXF2GLB -- model.dxf -o output.glb
 |--------|-------------|---------|
 | `-g, --glb` | Export trực tiếp sang GLB | false |
 | `-w, --wireframe` | Export dạng wireframe (LINES) | false |
+| `-o, --output <path>` | Output file path | `<input>.glb` |
+| `-d, --decimate <res>` | **Vertex Clustering Grid (32-1024)**. VD: 256 | 0 (disabled) |
+| `-j, --junk-filter` | Bật bộ lọc rác (Bounding Box + Island) | false |
+| `--min-component <n>` | Số triangles tối thiểu cho island | 100 |
 | `-e, --epsilon <value>` | Polyline simplification tolerance | 0.1 |
 | `-c, --chord-error <value>` | Arc tessellation chord error | 0.01 |
-| `-s, --spline-tolerance <value>` | Spline sampling tolerance | 0.05 |
-| `-m, --merge-distance <value>` | Merge near points distance | 0.001 |
-| `-o, --output <path>` | Output file path | `<input>.glb` |
-| `-l, --layers <l1,l2,...>` | Chỉ xử lý các layer cụ thể | all |
+| `-l, --layers <list>` | Chỉ xử lý các layer cụ thể | all |
 
 ## Khuyến nghị Epsilon theo đơn vị
 
@@ -77,7 +87,13 @@ DXF File
            │
            ▼
     ┌──────────────────┐
-    │  DxfPreprocessor │  ← Tối ưu hóa geometry
+    │  DxfPreprocessor │  ← Smart Triangulation
+    └──────────────────┘
+           │
+           ▼
+    ┌──────────────────┐
+    │ Mesh Optimizer   │  ← Vertex Clustering (-d)
+    │                  │  ← Junk Filtering (-j)
     └──────────────────┘
            │
            ▼
