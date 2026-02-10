@@ -176,6 +176,9 @@ public static class GlbExporter
     /// <summary>
     /// Create nodes from polylines - closed as triangles, open as lines
     /// </summary>
+    /// <summary>
+    /// Create nodes from polylines - effectively exports all polylines as lines (triangulation removed).
+    /// </summary>
     private static void CreateTriangulatedNodes(
         ModelRoot model,
         Node rootNode,
@@ -189,80 +192,43 @@ public static class GlbExporter
             var layerName = layerGroup.Key;
             var polylines = layerGroup.ToList();
             
-            // Separate closed and open polylines
-            var closedPolylines = polylines.Where(p => p.IsClosed && p.Points.Count >= 3).ToList();
-            var openPolylines = polylines.Where(p => !p.IsClosed && p.Points.Count >= 2).ToList();
+            var positions = new List<Vector3>();
+            var lineIndices = new List<(int, int)>();
             
-            // Process CLOSED polylines as triangles
-            if (closedPolylines.Count > 0)
+            foreach (var polyline in polylines)
             {
-                var positions = new List<Vector3>();
-                var triangleIndices = new List<int>();
+                if (polyline.Points.Count < 2) continue;
                 
-                foreach (var polyline in closedPolylines)
+                var startIndex = positions.Count;
+                
+                foreach (var point in polyline.Points)
                 {
-                    var startIndex = positions.Count;
-                    
-                    foreach (var point in polyline.Points)
-                    {
-                        positions.Add(new Vector3(
-                            (float)(point.X - center.X),
-                            (float)(point.Y - center.Y),
-                            (float)(point.Z - center.Z)
-                        ));
-                    }
-                    
-                    var localTriangles = EarClipperTriangulator.Triangulate(polyline.Points);
-                    foreach (var idx in localTriangles)
-                    {
-                        triangleIndices.Add(startIndex + idx);
-                    }
+                    positions.Add(new Vector3(
+                        (float)(point.X - center.X),
+                        (float)(point.Y - center.Y),
+                        (float)(point.Z - center.Z)
+                    ));
                 }
                 
-                if (positions.Count > 0 && triangleIndices.Count > 0)
+                for (int i = 0; i < polyline.Points.Count - 1; i++)
                 {
-                    var triangleCount = triangleIndices.Count / 3;
-                    Console.WriteLine($"  Layer '{layerName}' (closed): {positions.Count:N0} vertices, {triangleCount:N0} triangles");
-                    
-                    var mesh = CreateTriangleMesh(model, layerName, positions, triangleIndices);
-                    var node = rootNode.CreateNode(layerName);
-                    node.Mesh = mesh;
+                    lineIndices.Add((startIndex + i, startIndex + i + 1));
+                }
+                
+                // If closed, add the closing segment
+                if (polyline.IsClosed && polyline.Points.Count > 2)
+                {
+                    lineIndices.Add((startIndex + polyline.Points.Count - 1, startIndex));
                 }
             }
             
-            // Process OPEN polylines as lines
-            if (openPolylines.Count > 0)
+            if (positions.Count > 0 && lineIndices.Count > 0)
             {
-                var positions = new List<Vector3>();
-                var lineIndices = new List<(int, int)>();
+                Console.WriteLine($"  Layer '{layerName}' (lines): {positions.Count:N0} vertices, {lineIndices.Count:N0} line segments");
                 
-                foreach (var polyline in openPolylines)
-                {
-                    var startIndex = positions.Count;
-                    
-                    foreach (var point in polyline.Points)
-                    {
-                        positions.Add(new Vector3(
-                            (float)(point.X - center.X),
-                            (float)(point.Y - center.Y),
-                            (float)(point.Z - center.Z)
-                        ));
-                    }
-                    
-                    for (int i = 0; i < polyline.Points.Count - 1; i++)
-                    {
-                        lineIndices.Add((startIndex + i, startIndex + i + 1));
-                    }
-                }
-                
-                if (positions.Count > 0 && lineIndices.Count > 0)
-                {
-                    Console.WriteLine($"  Layer '{layerName}' (open): {positions.Count:N0} vertices, {lineIndices.Count:N0} line segments");
-                    
-                    var mesh = CreateLineMesh(model, layerName + "_lines", positions, lineIndices);
-                    var node = rootNode.CreateNode(layerName + "_lines");
-                    node.Mesh = mesh;
-                }
+                var mesh = CreateLineMesh(model, layerName, positions, lineIndices);
+                var node = rootNode.CreateNode(layerName);
+                node.Mesh = mesh;
             }
         }
     }
@@ -275,24 +241,36 @@ public static class GlbExporter
     {
         var mesh = model.CreateMesh(meshName);
         
+        // Position buffer
         var positionBuffer = CreatePositionBuffer(positions);
         var positionBufferView = model.UseBufferView(positionBuffer);
         var positionAccessor = model.CreateAccessor();
         positionAccessor.SetData(positionBufferView, 0, positions.Count, DimensionType.VEC3, EncodingType.FLOAT, false);
         
+        // Normal buffer - calculate smooth normals for proper shading
+        var normals = CalculateNormals(positions, triangleIndices);
+        var normalBuffer = CreatePositionBuffer(normals); // Same format as positions (3x float)
+        var normalBufferView = model.UseBufferView(normalBuffer);
+        var normalAccessor = model.CreateAccessor();
+        normalAccessor.SetData(normalBufferView, 0, normals.Count, DimensionType.VEC3, EncodingType.FLOAT, false);
+        
+        // Index buffer
         var indices = triangleIndices.Select(i => (uint)i).ToList();
         var indexBuffer = CreateIndexBuffer(indices);
         var indexBufferView = model.UseBufferView(indexBuffer);
         var indexAccessor = model.CreateAccessor();
         indexAccessor.SetData(indexBufferView, 0, indices.Count, DimensionType.SCALAR, EncodingType.UNSIGNED_INT, false);
         
+        // Primitive with POSITION + NORMAL
         var primitive = mesh.CreatePrimitive();
         primitive.SetVertexAccessor("POSITION", positionAccessor);
+        primitive.SetVertexAccessor("NORMAL", normalAccessor);
         primitive.SetIndexAccessor(indexAccessor);
         primitive.DrawPrimitiveType = PrimitiveType.TRIANGLES;
         
-        var material = model.CreateMaterial("SolidMaterial_" + meshName);
-        material.WithUnlit();
+        // PBR material (reacts to lighting, unlike WithUnlit which was causing white model)
+        var material = model.CreateMaterial("PBR_" + meshName);
+        material.WithPBRMetallicRoughness();
         material.DoubleSided = true;
         primitive.Material = material;
         
@@ -357,6 +335,44 @@ public static class GlbExporter
             System.Buffer.BlockCopy(BitConverter.GetBytes(indices[i]), 0, buffer, i * 4, 4);
         }
         return buffer;
+    }
+
+    /// <summary>
+    /// Calculates smooth vertex normals by accumulating face normals.
+    /// Each vertex normal is the normalized sum of all adjacent face normals.
+    /// </summary>
+    private static List<Vector3> CalculateNormals(List<Vector3> positions, List<int> indices)
+    {
+        var normals = new Vector3[positions.Count];
+        
+        // Accumulate face normals for each vertex
+        for (int i = 0; i < indices.Count; i += 3)
+        {
+            var i0 = indices[i];
+            var i1 = indices[i + 1];
+            var i2 = indices[i + 2];
+            
+            var edge1 = positions[i1] - positions[i0];
+            var edge2 = positions[i2] - positions[i0];
+            var faceNormal = Vector3.Cross(edge1, edge2);
+            
+            // Weight by face area (magnitude of cross product)
+            normals[i0] += faceNormal;
+            normals[i1] += faceNormal;
+            normals[i2] += faceNormal;
+        }
+        
+        // Normalize all vertex normals
+        var result = new List<Vector3>(positions.Count);
+        for (int i = 0; i < normals.Length; i++)
+        {
+            var n = normals[i];
+            result.Add(n.LengthSquared() > 1e-6f
+                ? Vector3.Normalize(n)
+                : Vector3.UnitY); // Fallback for degenerate vertices
+        }
+        
+        return result;
     }
 
     private static Vector3d CalculateCenter(OptimizedGeometry geometry)
